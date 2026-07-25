@@ -1277,6 +1277,636 @@ app.post("/api/spritesheet/generate", async (req, res) => {
     });
   }
 });
+
+// AI Generation Endpoint
+app.post("/api/generate", async (req, res) => {
+  try {
+    const { prompt, style = "pixel_art", animations = "idle,walk,run", referenceImage } = req.body;
+
+    if (!prompt) {
+      return res.status(400).json({ error: "prompt is required" });
+    }
+
+    let characterData: any = null;
+    let usedAI = false;
+
+    // Try to use Gemini API if available
+    try {
+      const aiClient = getGeminiClient();
+      
+      // Enhanced prompt for Gemini
+      const enhancedPrompt = `You are a game asset designer. Create a detailed description for a ${style} pixel art character based on this prompt: "${prompt}"
+
+For animations (${animations}), describe what visual changes should occur.
+
+Format your response as JSON with this structure:
+{
+  "characterName": "name of the character",
+  "visualDescription": "detailed description of the character's appearance",
+  "animationDescriptions": {
+    "idle": "how the character looks at rest",
+    "walk": "how the character moves",
+    "run": "how the character runs",
+    "attack": "attack pose",
+    "jump": "jump pose"
+  },
+  "colorPalette": ["color1", "color2", "color3"],
+  "style": "${style}"
+}`;
+
+      const response = await callGeminiWithRetryAndFallback(
+        aiClient,
+        [{ text: enhancedPrompt }],
+        { maxOutputTokens: 1024, temperature: 0.7 }
+      );
+
+      // Extract text from response
+      const responseText = response.text;
+      
+      // Parse JSON from response
+      try {
+        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+        characterData = jsonMatch ? JSON.parse(jsonMatch[0]) : null;
+        usedAI = true;
+        console.log("[AI Generation] Successfully generated character data via Gemini");
+      } catch (parseError) {
+        console.warn("[AI Generation] Failed to parse Gemini response as JSON, using defaults");
+        characterData = {
+          characterName: prompt.substring(0, 30),
+          visualDescription: responseText,
+          animationDescriptions: {
+            idle: "standing at rest",
+            walk: "walking forward",
+            run: "running forward",
+            attack: "attacking",
+            jump: "jumping"
+          },
+          colorPalette: ["#FF6B9D", "#C06C84", "#6C5B7B"]
+        };
+        usedAI = true;
+      }
+    } catch (apiError: any) {
+      console.warn("[AI Generation] Gemini API not available or failed, falling back to procedural generation:", apiError.message);
+      // Will fall back to procedural generation below
+    }
+
+    // Generate procedural spritesheet
+    const fallbackResult = generateProceduralFallback(prompt, style, 12);
+    const frames = fallbackResult.frames.slice(0, 12);
+    while (frames.length < 12) {
+      frames.push(frames[frames.length - 1] || `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"></svg>`);
+    }
+
+    // Create asset with metadata
+    const asset = {
+      id: `asset_${Date.now()}`,
+      name: (characterData?.characterName || prompt).substring(0, 50),
+      sprite: {
+        characterName: characterData?.characterName || fallbackResult.characterName,
+        description: characterData?.visualDescription || fallbackResult.description,
+        prompt: prompt,
+        style: style,
+        animations: animations.split(",").map((a: string) => ({
+          name: a.trim(),
+          description: characterData?.animationDescriptions?.[a.trim()] || `${a.trim()} animation`
+        })),
+        frameCount: 12,
+        sheetSize: [256, 256] as [number, number],
+        spritesheetPng: `/generated/ai_${Date.now()}.png`,
+        inputReferenceInvariant: referenceImage ? "reference_image" : undefined,
+        colorPalette: characterData?.colorPalette || ["#FF6B9D", "#C06C84", "#6C5B7B"]
+      },
+      tags: [style, "ai-generated", ...(characterData?.tags || [])],
+      role: "character",
+      createdTime: new Date().toISOString(),
+      generationMetadata: {
+        provider: usedAI ? "gemini" : "procedural",
+        model: usedAI ? "gemini-2.5-flash/gemini-2.0-flash" : "procedural",
+        prompt: prompt,
+        style: style,
+        timestamp: new Date().toISOString()
+      },
+      frames: frames,
+      spritesheetSvg: bundleFramesToSpritesheet(frames, 12, 4),
+      isFallback: !usedAI
+    };
+
+    // Save to game library
+    const library = readGameLibrary();
+    library.assets.push(asset);
+    writeGameLibrary(library);
+
+    return res.json({
+      success: true,
+      asset,
+      characterData,
+      spritesheetSvg: asset.spritesheetSvg,
+      usedAI,
+      message: usedAI ? "Generated with AI" : "Generated with procedural fallback"
+    });
+  } catch (error: any) {
+    console.error("[AI Generation] Unhandled error:", error);
+    res.status(500).json({
+      error: "Failed to generate asset",
+      details: error.message || String(error)
+    });
+  }
+});
+
+// Configure Vite middleware or production build output
+async function startServer() {
+  const port = await findAvailablePort(REQUESTED_PORT, "app");
+
+  if (process.env.NODE_ENV !== "production") {
+    const hmrPort = await findAvailablePort(Math.max(24678, port + 1), "vite hmr");
+
+    // Development mode
+    const vite = await createViteServer({
+      server: {
+        hmr: { port: hmrPort },
+        middlewareMode: true,
+        watch: { ignored: RUNTIME_GENERATED_WATCH_IGNORES }
+      },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+    console.log(`Vite HMR is running on ws://localhost:${hmrPort}`);
+  } else {
+    // Production mode
+    const distPath = path.join(process.cwd(), "dist");
+    app.use(express.static(distPath));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
+    });
+  }
+
+  const activePort = await listenWithPortFallback(port);
+  console.log(`Server is running on http://localhost:${activePort}`);
+}
+
+startServer();4,([a-z0-9+/=\r\n]+)$/i);
+    if (!match) {
+      return res.status(400).json({ error: "PNG dataUrl is required" });
+    }
+
+    fs.mkdirSync(GENERATED_DIR, { recursive: true });
+    const requestedName = sanitizeGeneratedImageFilename(req.body?.filename);
+    const baseName = requestedName.replace(/\.png$/i, "");
+    let filename = requestedName;
+    let outputPath = path.join(GENERATED_DIR, filename);
+    let suffix = 2;
+    while (fs.existsSync(outputPath)) {
+      filename = `${baseName}_${suffix}.png`;
+      outputPath = path.join(GENERATED_DIR, filename);
+      suffix += 1;
+    }
+
+    fs.writeFileSync(outputPath, Buffer.from(match[1].replace(/\s+/g, ""), "base64"));
+    res.json({ file: generatedImageMetadata(filename) });
+  } catch (error: any) {
+    console.warn("Failed to save generated image:", error);
+    res.status(500).json({ error: error?.message || "Failed to save generated image" });
+  }
+});
+
+app.post("/api/game-library/assets", (req, res) => {
+  const asset = req.body?.asset;
+  if (!asset || !asset.id || !asset.sprite || !Array.isArray(asset.sprite.frames)) {
+    return res.status(400).json({ error: "asset with id and sprite.frames is required" });
+  }
+  const library = readGameLibrary();
+  const normalizedAsset = {
+    ...asset,
+    confirmed: true,
+    savedTime: asset.savedTime || new Date().toISOString(),
+    updatedTime: new Date().toISOString()
+  };
+  library.assets = [
+    normalizedAsset,
+    ...library.assets.filter((item: any) => item.id !== normalizedAsset.id)
+  ];
+  writeGameLibrary(library);
+  res.json({ asset: normalizedAsset, library });
+});
+
+app.post("/api/game-library/start-ui", (req, res) => {
+  const startUi = req.body?.startUi;
+  if (!startUi || typeof startUi !== "object") {
+    return res.status(400).json({ error: "startUi settings are required" });
+  }
+  const library = readGameLibrary();
+  const normalizedStartUi = {
+    ...startUi,
+    id: typeof startUi.id === "string" && startUi.id ? startUi.id : "start_ui_main",
+    updatedTime: new Date().toISOString()
+  };
+  const existingStartUis = Array.isArray(library.startUis) ? library.startUis : [];
+  const existingIndex = existingStartUis.findIndex((item: any) => item?.id === normalizedStartUi.id);
+  library.startUis = existingIndex >= 0
+    ? existingStartUis.map((item: any, index: number) => index === existingIndex ? normalizedStartUi : item)
+    : [...existingStartUis, normalizedStartUi];
+  library.startUi = library.startUis[0] || normalizedStartUi;
+  writeGameLibrary(library);
+  res.json({ startUi: normalizedStartUi, startUis: library.startUis, library });
+});
+
+app.delete("/api/game-library/start-ui/:id", (req, res) => {
+  const library = readGameLibrary();
+  const existingStartUis = Array.isArray(library.startUis) ? library.startUis : [];
+  library.startUis = existingStartUis.filter((item: any) => item?.id !== req.params.id);
+  library.startUi = library.startUis[0];
+  removeNodeFromFlowGraph(library, req.params.id);
+  writeGameLibrary(library);
+  res.json({ startUi: library.startUi, startUis: library.startUis, library });
+});
+
+app.delete("/api/game-library/assets/:id", (req, res) => {
+  const library = readGameLibrary();
+  library.assets = library.assets.filter((item: any) => item.id !== req.params.id);
+  library.scenes = library.scenes.map((scene: any) => ({
+    ...scene,
+    layers: Array.isArray(scene.layers) ? scene.layers.filter((layer: any) => layer.assetId !== req.params.id) : []
+  }));
+  library.animationScenes = library.animationScenes.map((animationScene: any) => ({
+    ...animationScene,
+    tracks: Array.isArray(animationScene.tracks)
+      ? animationScene.tracks.map((track: any) => ({
+          ...track,
+          clips: Array.isArray(track.clips)
+            ? track.clips.filter((clip: any) => clip.assetId !== req.params.id)
+            : []
+        }))
+      : []
+  }));
+  writeGameLibrary(library);
+  res.json({ library });
+});
+
+app.post("/api/game-library/scenes", (req, res) => {
+  const scene = req.body?.scene;
+  if (!scene || !scene.id || !Array.isArray(scene.layers)) {
+    return res.status(400).json({ error: "scene with id and layers is required" });
+  }
+  const library = readGameLibrary();
+  const normalizedScene = {
+    ...scene,
+    savedTime: scene.savedTime || new Date().toISOString(),
+    updatedTime: new Date().toISOString()
+  };
+  library.scenes = [
+    normalizedScene,
+    ...library.scenes.filter((item: any) => item.id !== normalizedScene.id)
+  ];
+  writeGameLibrary(library);
+  res.json({ scene: normalizedScene, library });
+});
+
+app.delete("/api/game-library/scenes/:id", (req, res) => {
+  const library = readGameLibrary();
+  const beforeCount = library.scenes.length;
+  library.scenes = library.scenes.filter((item: any) => item.id !== req.params.id);
+  if (library.scenes.length === beforeCount) {
+    return res.status(404).json({ error: "Scene not found" });
+  }
+  removeNodeFromFlowGraph(library, req.params.id);
+  writeGameLibrary(library);
+  res.json({ library });
+});
+
+app.post("/api/game-library/animation-scenes", (req, res) => {
+  const animationScene = req.body?.animationScene;
+  if (!animationScene || !animationScene.id || !Array.isArray(animationScene.tracks)) {
+    return res.status(400).json({ error: "animationScene with id and tracks is required" });
+  }
+  const library = readGameLibrary();
+  const normalizedAnimationScene = {
+    ...animationScene,
+    version: 1,
+    kind: "animation",
+    savedTime: animationScene.savedTime || new Date().toISOString(),
+    updatedTime: new Date().toISOString()
+  };
+  library.animationScenes = [
+    normalizedAnimationScene,
+    ...library.animationScenes.filter((item: any) => item.id !== normalizedAnimationScene.id)
+  ];
+  writeGameLibrary(library);
+  res.json({ animationScene: normalizedAnimationScene, library });
+});
+
+app.delete("/api/game-library/animation-scenes/:id", (req, res) => {
+  const library = readGameLibrary();
+  const beforeCount = library.animationScenes.length;
+  library.animationScenes = library.animationScenes.filter((item: any) => item.id !== req.params.id);
+  if (library.animationScenes.length === beforeCount) {
+    return res.status(404).json({ error: "Animation scene not found" });
+  }
+  removeNodeFromFlowGraph(library, req.params.id);
+  writeGameLibrary(library);
+  res.json({ library });
+});
+
+app.put("/api/game-library/flow", (req, res) => {
+  const flowGraph = req.body?.flowGraph;
+  if (!flowGraph || typeof flowGraph !== "object" || !Array.isArray(flowGraph.connections)) {
+    return res.status(400).json({ error: "flowGraph with connections is required" });
+  }
+  const library = readGameLibrary();
+  const nodeLayouts = flowGraph.nodeLayouts && typeof flowGraph.nodeLayouts === "object" && !Array.isArray(flowGraph.nodeLayouts)
+    ? flowGraph.nodeLayouts
+    : {};
+  const normalizedFlowGraph = {
+    version: 1,
+    connections: flowGraph.connections.filter((connection: any) => (
+      connection
+      && typeof connection.id === "string"
+      && typeof connection.sourceNodeId === "string"
+      && typeof connection.targetNodeId === "string"
+    )),
+    nodeLayouts,
+    updatedTime: new Date().toISOString()
+  };
+  library.flowGraph = normalizedFlowGraph;
+  writeGameLibrary(library);
+  res.json({ flowGraph: normalizedFlowGraph, library });
+});
+
+function sanitizeSvg(svg: string): string {
+  let cleaned = (svg || "").trim();
+  if (!cleaned.startsWith("<svg")) {
+    const startIdx = cleaned.indexOf("<svg");
+    if (startIdx !== -1) {
+      cleaned = cleaned.substring(startIdx);
+    } else {
+      cleaned = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">${cleaned}</svg>`;
+    }
+  }
+  const endIdx = cleaned.lastIndexOf("</svg>");
+  if (endIdx !== -1) {
+    cleaned = cleaned.substring(0, endIdx + 6);
+  }
+  return cleaned;
+}
+
+function splitSpritesheetSvg(sheetSvg: string, frameCount: number, columns: number): string[] {
+  const cleaned = sanitizeSvg(sheetSvg);
+  const startTagEnd = cleaned.indexOf(">");
+  const endTagStart = cleaned.lastIndexOf("</svg>");
+  const innerBody = startTagEnd !== -1 && endTagStart !== -1
+    ? cleaned.substring(startTagEnd + 1, endTagStart)
+    : cleaned;
+
+  const frames: string[] = [];
+  for (let idx = 0; idx < frameCount; idx++) {
+    const col = idx % columns;
+    const row = Math.floor(idx / columns);
+    const x = col * 256;
+    const y = row * 256;
+    frames.push(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${x} ${y} 256 256" width="256" height="256">${innerBody}</svg>`);
+  }
+  return frames;
+}
+
+function escapeXmlAttr(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function localMotionForPrompt(prompt: string, frameCount: number, idx: number) {
+  const text = (prompt || "").toLowerCase();
+  const t = idx / frameCount;
+  const wave = Math.sin(t * Math.PI * 2);
+  const wave2 = Math.cos(t * Math.PI * 2);
+  const jump = Math.sin(t * Math.PI);
+
+  if (/walk|run|走|跑/.test(text)) {
+    return { y: Math.abs(wave) * -9, x: wave2 * 3, rotate: wave * 3, scaleX: 1 + Math.abs(wave) * 0.025, scaleY: 1 - Math.abs(wave) * 0.025, fx: "dust" };
+  }
+  if (/attack|slash|hit|攻击|挥|砍/.test(text)) {
+    const strike = Math.sin(Math.min(1, t * 1.65) * Math.PI);
+    return { y: strike * -7, x: strike * 8, rotate: -8 + strike * 18, scaleX: 1 + strike * 0.04, scaleY: 1 - strike * 0.02, fx: "slash" };
+  }
+  if (/jump|跳/.test(text)) {
+    return { y: jump * -30, x: wave * 2, rotate: wave * 4, scaleX: 1 + (t > .84 ? .08 : 0), scaleY: 1 - (t > .84 ? .08 : 0), fx: "dust" };
+  }
+  if (/magic|spell|cast|fire|glow|spark|魔法|施法|火|光|粒子/.test(text)) {
+    return { y: wave * -5, x: 0, rotate: wave2 * 2, scaleX: 1 + wave * 0.018, scaleY: 1 - wave * 0.018, fx: "magic" };
+  }
+  return { y: wave * -5, x: wave2 * 1.5, rotate: wave * 2, scaleX: 1 + wave * 0.025, scaleY: 1 - wave * 0.025, fx: "idle" };
+}
+
+function constrainReferenceMotion(motion: { y: number; x: number; rotate: number; scaleX: number; scaleY: number; fx: string }) {
+  return {
+    ...motion,
+    x: Math.max(-10, Math.min(10, motion.x)),
+    y: Math.max(-30, Math.min(12, motion.y)),
+    rotate: Math.max(-4.5, Math.min(4.5, motion.rotate)),
+    scaleX: Math.max(0.94, Math.min(1.05, motion.scaleX)),
+    scaleY: Math.max(0.94, Math.min(1.05, motion.scaleY))
+  };
+}
+
+function localReferenceWalkFrame(href: string, filter: string, ox: number, oy: number, idx: number, frameCount: number) {
+  const phase = (idx / frameCount) * Math.PI * 2;
+  const step = Math.sin(phase);
+  const counter = Math.sin(phase + Math.PI);
+  const bob = Math.abs(step) * -5;
+  const torsoTilt = Math.sin(phase) * 1.4;
+  const leftLeg = step * 10;
+  const rightLeg = counter * 10;
+  const leftFootX = step * 8;
+  const rightFootX = counter * 8;
+  const skirtSway = step * 2.4;
+  const shadowRx = 42 + Math.abs(step) * 5;
+
+  const ids = {
+    upper: `upper_${idx}`,
+    skirt: `skirt_${idx}`,
+    leftLeg: `left_leg_${idx}`,
+    rightLeg: `right_leg_${idx}`,
+    leftArm: `left_arm_${idx}`,
+    rightArm: `right_arm_${idx}`
+  };
+
+  const image = `<use href="#refSprite"/>`;
+
+  return `
+    <g id="frame_${idx + 1}">
+      <defs>
+        <clipPath id="${ids.upper}" clipPathUnits="userSpaceOnUse"><rect x="${ox}" y="${oy}" width="256" height="154"/></clipPath>
+        <clipPath id="${ids.skirt}" clipPathUnits="userSpaceOnUse"><rect x="${ox + 62}" y="${oy + 116}" width="132" height="58"/></clipPath>
+        <clipPath id="${ids.leftLeg}" clipPathUnits="userSpaceOnUse"><rect x="${ox + 65}" y="${oy + 150}" width="66" height="88"/></clipPath>
+        <clipPath id="${ids.rightLeg}" clipPathUnits="userSpaceOnUse"><rect x="${ox + 125}" y="${oy + 150}" width="66" height="88"/></clipPath>
+        <clipPath id="${ids.leftArm}" clipPathUnits="userSpaceOnUse"><rect x="${ox + 45}" y="${oy + 74}" width="62" height="122"/></clipPath>
+        <clipPath id="${ids.rightArm}" clipPathUnits="userSpaceOnUse"><rect x="${ox + 150}" y="${oy + 74}" width="62" height="122"/></clipPath>
+      </defs>
+      <ellipse cx="${ox + 128}" cy="${oy + 240}" rx="${shadowRx.toFixed(1)}" ry="8" fill="#0f172a" opacity=".20"/>
+      <g transform="translate(${ox + 128} ${oy + 128 + bob}) rotate(${torsoTilt.toFixed(2)}) translate(${-ox - 128} ${-oy - 128})" clip-path="url(#${ids.upper})">
+        <g transform="translate(${ox} ${oy})">${image}</g>
+      </g>
+      <g transform="translate(${ox + 86} ${oy + 104 + bob}) rotate(${(-step * 5).toFixed(2)}) translate(${-ox - 86} ${-oy - 104})" clip-path="url(#${ids.leftArm})">
+        <g transform="translate(${ox} ${oy})">${image}</g>
+      </g>
+      <g transform="translate(${ox + 170} ${oy + 104 + bob}) rotate(${(step * 5).toFixed(2)}) translate(${-ox - 170} ${-oy - 104})" clip-path="url(#${ids.rightArm})">
+        <g transform="translate(${ox} ${oy})">${image}</g>
+      </g>
+      <g transform="translate(${ox + 128} ${oy + 142 + bob}) rotate(${skirtSway.toFixed(2)}) translate(${-ox - 128} ${-oy - 142})" clip-path="url(#${ids.skirt})">
+        <g transform="translate(${ox} ${oy})">${image}</g>
+      </g>
+      <g transform="translate(${ox + 105} ${oy + 153 + bob}) rotate(${leftLeg.toFixed(2)}) translate(${-ox - 105} ${-oy - 153})" clip-path="url(#${ids.leftLeg})">
+        <g transform="translate(${leftFootX.toFixed(2)} 0) translate(${ox} ${oy})">${image}</g>
+      </g>
+      <g transform="translate(${ox + 150} ${oy + 153 + bob}) rotate(${rightLeg.toFixed(2)}) translate(${-ox - 150} ${-oy - 153})" clip-path="url(#${ids.rightLeg})">
+        <g transform="translate(${rightFootX.toFixed(2)} 0) translate(${ox} ${oy})">${image}</g>
+      </g>
+    </g>`;
+}function localImageSpritesheet(referenceImage: string, prompt: string, style: string, frameCount: number, columns: number) {
+  const rows = Math.ceil(frameCount / columns);
+  const width = columns * 256;
+  const height = rows * 256;
+  const href = escapeXmlAttr(referenceImage);
+  const text = (prompt || "").toLowerCase();
+  const wantsPixel = /pixel|像素/.test(text + " " + style.toLowerCase());
+  const wantsFire = /fire|flame|火/.test(text);
+  const wantsMagic = /magic|spell|cast|glow|spark|魔法|光|粒子|施法/.test(text);
+  const wantsWalk = /walk|walking|run|走|行走|跑/.test(text);
+  const filter = wantsPixel ? "image-rendering:pixelated" : "";
+
+  let cells = "";
+  for (let idx = 0; idx < frameCount; idx++) {
+    const col = idx % columns;
+    const row = Math.floor(idx / columns);
+    const ox = col * 256;
+    const oy = row * 256;
+    const t = idx / frameCount;
+    if (wantsWalk) {
+      throw new Error("Reference-image walking cycles require Codex image redraw spritesheet generation. Local pseudo-rig walking is intentionally disabled to avoid drift/float artifacts.");
+    }
+    const motion = constrainReferenceMotion(localMotionForPrompt(prompt, frameCount, idx));
+    const cx = ox + 128 + motion.x;
+    const cy = oy + 128 + motion.y;
+    const shadowScale = 1 - Math.min(0.28, Math.abs(motion.y) / 120);
+    const phase = t * Math.PI * 2;
+
+    const fx = motion.fx === "slash" ? `
+      <path d="M ${ox + 54} ${oy + 176} Q ${ox + 136} ${oy + 54} ${ox + 214} ${oy + 116}" fill="none" stroke="#f8fbff" stroke-width="8" stroke-linecap="round" opacity="${0.22 + Math.max(0, Math.sin(phase)) * 0.45}"/>
+      <path d="M ${ox + 64} ${oy + 184} Q ${ox + 138} ${oy + 78} ${ox + 204} ${oy + 128}" fill="none" stroke="#56c7ff" stroke-width="3" stroke-linecap="round" opacity="${0.25 + Math.max(0, Math.sin(phase)) * 0.55}"/>`
+      : (motion.fx === "magic" || wantsMagic || wantsFire) ? Array.from({ length: 8 }).map((_, p) => {
+        const a = phase + p * Math.PI * 2 / 8;
+        const r = 58 + Math.sin(phase + p) * 8;
+        const x = ox + 128 + Math.cos(a) * r;
+        const y = oy + 124 + Math.sin(a * 1.15) * r * .55;
+        const color = wantsFire ? (p % 2 ? "#ff6a2a" : "#ffd166") : (p % 2 ? "#64d8ff" : "#f6d365");
+        return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${(2.5 + (p % 3)).toFixed(1)}" fill="${color}" opacity=".82"/>`;
+      }).join("")
+      : `<circle cx="${ox + 92 + Math.sin(phase) * 6}" cy="${oy + 82}" r="3" fill="#ffffff" opacity=".5"/>`;
+
+    cells += `
+      <g id="frame_${idx + 1}">
+        <ellipse cx="${ox + 128}" cy="${oy + 218}" rx="${(58 * shadowScale).toFixed(1)}" ry="9" fill="#0f172a" opacity=".18"/>
+        ${fx}
+        <g transform="translate(${cx.toFixed(2)} ${cy.toFixed(2)}) rotate(${motion.rotate.toFixed(2)}) scale(${motion.scaleX.toFixed(3)} ${motion.scaleY.toFixed(3)}) translate(-128 -128)">
+          <image href="${href}" x="38" y="38" width="180" height="180" preserveAspectRatio="xMidYMid meet" style="${filter}"/>
+        </g>
+      </g>`;
+  }
+
+  const spritesheetSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
+    <defs>
+      ${wantsWalk ? `<image id="refSprite" href="${href}" x="42" y="10" width="172" height="236" preserveAspectRatio="xMidYMid meet" style="${filter}"/>` : ""}
+      <filter id="softShadow"><feGaussianBlur stdDeviation="2"/></filter>
+    </defs>
+    ${cells}
+  </svg>`;
+
+  return {
+    characterName: "Local Reference Sprite",
+    description: "Local spritesheet generated from the uploaded transparent PNG without cloud AI calls. Walk requests use a layered pseudo-rig so the torso, arms, skirt, and legs move as a continuous cycle while the full character remains inside every 256x256 frame.",
+    spritesheetSvg,
+    frames: splitSpritesheetSvg(spritesheetSvg, frameCount, columns)
+  };
+}
+
+function bundleFramesToSpritesheet(frames: string[], frameCount: number, columns: number): string {
+  const rows = Math.ceil(frameCount / columns);
+  const width = columns * 256;
+  const height = rows * 256;
+  let body = "";
+  frames.slice(0, frameCount).forEach((rawSvg, idx) => {
+    const svg = sanitizeSvg(rawSvg);
+    const startTagEnd = svg.indexOf(">");
+    const endTagStart = svg.lastIndexOf("</svg>");
+    const inner = startTagEnd !== -1 && endTagStart !== -1 ? svg.substring(startTagEnd + 1, endTagStart) : svg;
+    const x = (idx % columns) * 256;
+    const y = Math.floor(idx / columns) * 256;
+    body += `<g transform="translate(${x} ${y})">${inner}</g>`;
+  });
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">${body}</svg>`;
+}
+
+// Spritesheet Generator Endpoint
+app.post("/api/spritesheet/generate", async (req, res) => {
+  const { prompt = "", referenceImage, frameCount = 12, style = "Local Sprite" } = req.body;
+  const actualFrameCount = frameCount === 12 || frameCount === 16 ? frameCount : 12;
+  const sheetColumns = 4;
+  const sheetRows = Math.ceil(actualFrameCount / sheetColumns);
+
+  try {
+    if (!prompt && !referenceImage) {
+      return res.status(400).json({ error: "prompt or referenceImage is required" });
+    }
+
+    let result: { characterName: string; description: string; spritesheetSvg: string; frames: string[] };
+
+    if (referenceImage && typeof referenceImage === "string" && referenceImage.includes(";base64,")) {
+      result = localImageSpritesheet(referenceImage, prompt, style, actualFrameCount, sheetColumns);
+    } else {
+      const fallbackResult = generateProceduralFallback(prompt || "local idle sprite", style, actualFrameCount);
+      const frames = fallbackResult.frames.slice(0, actualFrameCount);
+      while (frames.length < actualFrameCount) {
+        frames.push(frames[frames.length - 1] || `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"></svg>`);
+      }
+      result = {
+        characterName: fallbackResult.characterName,
+        description: fallbackResult.description.replace("[Procedural Engine Bypassed]", "[Local Codex Sprite Engine]"),
+        frames,
+        spritesheetSvg: bundleFramesToSpritesheet(frames, actualFrameCount, sheetColumns)
+      };
+    }
+
+    const responsePayload = {
+      characterName: result.characterName,
+      description: result.description,
+      frames: result.frames,
+      spritesheetSvg: result.spritesheetSvg,
+      sheetColumns,
+      sheetRows,
+      style,
+      frameCount: result.frames.length,
+      isFallback: false,
+      generationMode: referenceImage ? "local_reference_image_spritesheet" : "local_procedural_spritesheet"
+    };
+    latestGeneratedSprite = {
+      id: `latest_${Date.now()}`,
+      characterName: responsePayload.characterName,
+      description: responsePayload.description,
+      frameCount: responsePayload.frameCount,
+      style,
+      prompt,
+      frames: responsePayload.frames,
+      createdTime: new Date().toISOString(),
+      isPreset: false,
+      spritesheetSvg: responsePayload.spritesheetSvg,
+      generationMode: responsePayload.generationMode
+    };
+    res.json(responsePayload);
+  } catch (error: any) {
+    console.error("Local spritesheet generation failed:", error);
+    res.status(500).json({
+      error: "Failed to generate local spritesheet",
+      details: error.message || String(error)
+    });
+  }
+});
 // Configure Vite middleware or production build output
 async function startServer() {
   const port = await findAvailablePort(REQUESTED_PORT, "app");
