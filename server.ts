@@ -1277,6 +1277,142 @@ app.post("/api/spritesheet/generate", async (req, res) => {
     });
   }
 });
+
+// AI Generation Endpoint
+app.post("/api/generate", async (req, res) => {
+  try {
+    const { prompt, style = "pixel_art", animations = "idle,walk,run", referenceImage } = req.body;
+
+    if (!prompt) {
+      return res.status(400).json({ error: "prompt is required" });
+    }
+
+    let characterData: any = null;
+    let usedAI = false;
+
+    // Try to use Gemini API if available
+    try {
+      const aiClient = getGeminiClient();
+      
+      // Enhanced prompt for Gemini
+      const enhancedPrompt = `You are a game asset designer. Create a detailed description for a ${style} pixel art character based on this prompt: "${prompt}"
+
+For animations (${animations}), describe what visual changes should occur.
+
+Format your response as JSON with this structure:
+{
+  "characterName": "name of the character",
+  "visualDescription": "detailed description of the character's appearance",
+  "animationDescriptions": {
+    "idle": "how the character looks at rest",
+    "walk": "how the character moves",
+    "run": "how the character runs",
+    "attack": "attack pose",
+    "jump": "jump pose"
+  },
+  "colorPalette": ["color1", "color2", "color3"],
+  "style": "${style}"
+}`;
+
+      const response = await callGeminiWithRetryAndFallback(
+        aiClient,
+        [{ text: enhancedPrompt }],
+        { maxOutputTokens: 1024, temperature: 0.7 }
+      );
+
+      // Extract text from response
+      const responseText = response.text;
+      
+      // Parse JSON from response
+      try {
+        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+        characterData = jsonMatch ? JSON.parse(jsonMatch[0]) : null;
+        usedAI = true;
+        console.log("[AI Generation] Successfully generated character data via Gemini");
+      } catch (parseError) {
+        console.warn("[AI Generation] Failed to parse Gemini response as JSON, using defaults");
+        characterData = {
+          characterName: prompt.substring(0, 30),
+          visualDescription: responseText,
+          animationDescriptions: {
+            idle: "standing at rest",
+            walk: "walking forward",
+            run: "running forward",
+            attack: "attacking",
+            jump: "jumping"
+          },
+          colorPalette: ["#FF6B9D", "#C06C84", "#6C5B7B"]
+        };
+        usedAI = true;
+      }
+    } catch (apiError: any) {
+      console.warn("[AI Generation] Gemini API not available or failed, falling back to procedural generation:", apiError.message);
+      // Will fall back to procedural generation below
+    }
+
+    // Generate procedural spritesheet
+    const fallbackResult = generateProceduralFallback(prompt, style, 12);
+    const frames = fallbackResult.frames.slice(0, 12);
+    while (frames.length < 12) {
+      frames.push(frames[frames.length - 1] || `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"></svg>`);
+    }
+
+    // Create asset with metadata
+    const asset = {
+      id: `asset_${Date.now()}`,
+      name: (characterData?.characterName || prompt).substring(0, 50),
+      sprite: {
+        characterName: characterData?.characterName || fallbackResult.characterName,
+        description: characterData?.visualDescription || fallbackResult.description,
+        prompt: prompt,
+        style: style,
+        animations: animations.split(",").map((a: string) => ({
+          name: a.trim(),
+          description: characterData?.animationDescriptions?.[a.trim()] || `${a.trim()} animation`
+        })),
+        frameCount: 12,
+        sheetSize: [256, 256] as [number, number],
+        spritesheetPng: `/generated/ai_${Date.now()}.png`,
+        inputReferenceInvariant: referenceImage ? "reference_image" : undefined,
+        colorPalette: characterData?.colorPalette || ["#FF6B9D", "#C06C84", "#6C5B7B"]
+      },
+      tags: [style, "ai-generated", ...(characterData?.tags || [])],
+      role: "character",
+      createdTime: new Date().toISOString(),
+      generationMetadata: {
+        provider: usedAI ? "gemini" : "procedural",
+        model: usedAI ? "gemini-2.5-flash/gemini-2.0-flash" : "procedural",
+        prompt: prompt,
+        style: style,
+        timestamp: new Date().toISOString()
+      },
+      frames: frames,
+      spritesheetSvg: bundleFramesToSpritesheet(frames, 12, 4),
+      isFallback: !usedAI
+    };
+
+    // Save to game library
+    const library = readGameLibrary();
+    library.assets.push(asset);
+    writeGameLibrary(library);
+
+    return res.json({
+      success: true,
+      asset,
+      characterData,
+      spritesheetSvg: asset.spritesheetSvg,
+      usedAI,
+      message: usedAI ? "Generated with AI" : "Generated with procedural fallback"
+    });
+  } catch (error: any) {
+    console.error("[AI Generation] Unhandled error:", error);
+    res.status(500).json({
+      error: "Failed to generate asset",
+      details: error.message || String(error)
+    });
+  }
+});
+
 // Configure Vite middleware or production build output
 async function startServer() {
   const port = await findAvailablePort(REQUESTED_PORT, "app");
